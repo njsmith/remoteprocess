@@ -46,6 +46,7 @@ fn main() {
                     println!("cargo:rustc-link-lib=static=unwind-{}", target_arch);
                     println!("cargo:rustc-link-lib=static=z");
                 } else {
+                    println!("cargo:rustc-link-search=native=/usr/local/lib");
                     println!("cargo:rustc-link-lib=static=unwind");
                     println!("cargo:rustc-link-lib=static=unwind-ptrace");
                     println!("cargo:rustc-link-lib=static=unwind-{}", target_arch);
