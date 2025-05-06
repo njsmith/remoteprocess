@@ -4,11 +4,10 @@ use std::fs::File;
 use std::path::Path;
 
 use log::{debug, error, info, trace, warn};
-use memmap;
-use memmap::Mmap;
+use memmap2::Mmap;
 
 use crate::{Error, Pid, Process, StackFrame};
-use addr2line::ObjectContext;
+use addr2line::Loader;
 use goblin;
 use goblin::elf::program_header::*;
 use object::{self, Object, ObjectSymbol};
@@ -212,7 +211,7 @@ impl Symbolicator {
 
 pub struct SymbolData {
     // Contains symbol info for a single binary
-    ctx: ObjectContext,
+    address_loader: Loader,
     offset: u64,
     symbols: Vec<(u64, u64, String)>,
     dynamic_symbols: Vec<(u64, u64, String)>,
@@ -224,7 +223,7 @@ impl SymbolData {
         info!("opening {} for symbols", filename);
 
         let file = File::open(filename)?;
-        let map = unsafe { memmap::Mmap::map(&file)? };
+        let map = unsafe { Mmap::map(&file)? };
         let file = match object::File::parse(&*map) {
             Ok(f) => f,
             Err(e) => {
@@ -239,7 +238,7 @@ impl SymbolData {
             }
         };
 
-        let ctx = ObjectContext::new(&file).map_err(|e| {
+        let address_loader = Loader::new(filename).map_err(|e| {
             Error::Other(format!(
                 "Failed to get symbol context for {}: {:?}",
                 filename, e
@@ -262,7 +261,7 @@ impl SymbolData {
         }
         dynamic_symbols.sort_unstable_by(|a, b| a.cmp(&b));
         Ok(SymbolData {
-            ctx,
+            address_loader,
             offset,
             dynamic_symbols,
             symbols,
@@ -292,17 +291,13 @@ impl SymbolData {
         if line_info {
             let mut has_debug_info = false;
 
-            // addr2line0.8 uses an older version of gimli (0.0.19) than we are using here (0.0.21),
-            // this means we can't use the type of the error returned ourselves here since the
-            // type alias is private. hack by re-mapping the error
-            let error_handler = |e| Error::Other(format!("addr2line error: {:?}", e));
-
             // if we have debugging info, get the appropriate stack frames for the address
             let mut frames = self
-                .ctx
+                .address_loader
                 .find_frames(offset)
-                .skip_all_loads()
-                .map_err(error_handler)?;
+                .map_err(|e| Error::Other(format!("addr2line error: {:?}", e)))?;
+
+            let error_handler = |e| Error::Other(format!("addr2line error: {:?}", e));
             while let Some(frame) = frames.next().map_err(error_handler)? {
                 has_debug_info = true;
                 if let Some(func) = frame.function {
