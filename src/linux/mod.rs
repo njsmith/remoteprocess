@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::io::AsRawFd;
+use std::os::fd::AsFd;
 
 use super::Error;
 
@@ -97,6 +97,17 @@ impl Process {
                             // the thread probably exited before we could get a lock
                             continue;
                         }
+                        Err(e @ Error::NixError(nix::errno::Errno::EPERM)) => {
+                            if !thread.exists() {
+                                // The thread was probably in the "exiting" state, which returns
+                                // EPERM to the caller. This thread is dead, we can not ptrace
+                                // it and we should just ignore it.
+                                // See https://elixir.bootlin.com/linux/v6.15.3/source/kernel/ptrace.c#L458
+                                continue;
+                            }
+                            // We likely really have no permission, propagate the error
+                            return Err(e);
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -167,6 +178,11 @@ impl Thread {
 
     pub fn id(&self) -> Result<Tid, Error> {
         Ok(self.tid.as_raw())
+    }
+
+    /// True if this thread still exists and has not yet exited.
+    fn exists(&self) -> bool {
+        std::path::Path::new(&format!("/proc/{}/stat", self.tid)).exists()
     }
 
     pub fn active(&self) -> Result<bool, Error> {
@@ -244,7 +260,11 @@ impl ThreadLock {
                     _,
                     nix::sys::signal::Signal::SIGTRAP | nix::sys::signal::Signal::SIGTSTP,
                     event,
-                ) if event == ptrace::Event::PTRACE_EVENT_STOP as i32 => break,
+                ) if event == ptrace::Event::PTRACE_EVENT_STOP as i32
+                    || event == ptrace::Event::PTRACE_EVENT_EXIT as i32 =>
+                {
+                    break
+                }
                 // However, experimentally, it appears we see an exit status when
                 // a process is dying.
                 wait::WaitStatus::Exited(_, _) => break,
@@ -291,7 +311,7 @@ impl Namespace {
             let target = File::open(target_ns_filename)?;
             // need to open this here, gets trickier after changing the namespace
             let self_ns = File::open("/proc/self/ns/mnt")?;
-            setns(target.as_raw_fd(), CloneFlags::from_bits_truncate(0))?;
+            setns(target.as_fd(), CloneFlags::from_bits_truncate(0))?;
             Ok(Namespace {
                 ns_file: Some(self_ns),
             })
@@ -309,7 +329,7 @@ impl Namespace {
 impl Drop for Namespace {
     fn drop(&mut self) {
         if let Some(ns_file) = self.ns_file.as_ref() {
-            setns(ns_file.as_raw_fd(), CloneFlags::from_bits_truncate(0)).unwrap();
+            setns(ns_file.as_fd(), CloneFlags::from_bits_truncate(0)).unwrap();
             info!("Restored process namespace");
         }
     }
